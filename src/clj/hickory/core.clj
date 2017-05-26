@@ -18,24 +18,6 @@
      node must have an implementation of the HiccupRepresentable
      protocol; nodes created by parse or parse-fragment already do."))
 
-(defprotocol HickoryRepresentable
-  "Objects that can be represented as HTML DOM node maps, similar to
-   clojure.xml, implement this protocol to make the conversion.
-
-   Each DOM node will be a map or string (for Text/CDATASections). Nodes that
-   are maps have the appropriate subset of the keys
-
-     :type     - [:comment, :document, :document-type, :element]
-     :tag      - node's tag, check :type to see if applicable
-     :attrs    - node's attributes as a map, check :type to see if applicable
-     :content  - node's child nodes, in a vector, check :type to see if
-                 applicable"
-  (as-hickory [this]
-    "Converts the node given into a hickory-format data structure. The
-     node must have an implementation of the HickoryRepresentable protocol;
-     nodes created by parse or parse-fragment already do."))
-
-
 (extend-protocol HiccupRepresentable
   Attribute
   ;; Note the attribute value is not html-escaped; see comment for Element.
@@ -79,34 +61,42 @@
   XmlDeclaration
   (as-hiccup [this] (str this)))
 
-(extend-protocol HickoryRepresentable
-  Attribute
-  (as-hickory [this] [(utils/lower-case-keyword (.getKey this))
-                      (.getValue this)])
-  Attributes
-  (as-hickory [this] (not-empty (into {} (map as-hickory this))))
-  Comment
-  (as-hickory [this] {:type :comment
-                      :content [(.getData this)]})
-  DataNode
-  (as-hickory [this] (str this))
-  Document
-  (as-hickory [this] {:type :document
-                      :content (not-empty
-                                (into [] (map as-hickory
-                                              (.childNodes this))))})
-  DocumentType
-  (as-hickory [this] {:type :document-type
-                      :attrs (as-hickory (.attributes this))})
-  Element
-  (as-hickory [this] {:type :element
-                      :attrs (as-hickory (.attributes this))
-                      :tag (utils/lower-case-keyword (.tagName this))
-                      :content (not-empty
-                                (into [] (map as-hickory
-                                              (.childNodes this))))})
-  TextNode
-  (as-hickory [this] (.getWholeText this)))
+(defn- get-attrs [node]
+  (->> (.attributes node)
+       (map (fn [attr] [(utils/lower-case-keyword (.getKey attr)) (.getValue attr)]))
+       (into {})
+       not-empty))
+
+(defn- jsoup-zip [jsoup-doc]
+  (zip/zipper
+    (comp #{Document Element} type)
+    #(.childNodes %)
+    (fn [node children]
+      (condp = (type node)
+        Document {:type :document :content (vec children)}
+        Element {:type :element
+                 :tag (utils/lower-case-keyword (.tagName node))
+                 :attrs (get-attrs node)
+                 :content (when-not (= [nil] children) (vec children))}))
+    jsoup-doc))
+
+(defn- postwalk-zip [f zip-loc]
+  (loop [loc zip-loc]
+    (if (zip/end? loc)
+      (f (zip/node loc))
+      (recur (zip/next (zip/replace loc (f (zip/node loc))))))))
+
+(defn as-hickory [jsoup-doc]
+  (->> jsoup-doc
+       jsoup-zip
+       (postwalk-zip
+         (fn [node]
+           (condp = (type node)
+             Comment {:type :comment :content [(.getData node)]}
+             DataNode (str node)
+             DocumentType {:type :document-type :attrs (get-attrs node)}
+             TextNode (.getWholeText node)
+             node)))))
 
 (defn parse
   "Parse an entire HTML document into a DOM structure that can be
